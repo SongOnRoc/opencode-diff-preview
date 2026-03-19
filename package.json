@@ -1,0 +1,34 @@
+{
+  "name": "opencode-diff-preview",
+  "version": "0.1.0",
+  "description": "OpenCode plugin for permission-time VS Code diff preview on Windows",
+  "keywords": [
+    "opencode",
+    "plugin",
+    "diff",
+    "vscode",
+    "windows"
+  ],
+  "homepage": "https://opencode.ai/docs/plugins",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/anomalyco/opencode.git"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "typescript": "^5.8.2"
+  },
+  "license": "MIT"
+}
