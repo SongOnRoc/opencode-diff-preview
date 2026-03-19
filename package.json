@@ -12,7 +12,10 @@
   "homepage": "https://opencode.ai/docs/plugins",
   "repository": {
     "type": "git",
-    "url": "https://github.com/anomalyco/opencode.git"
+    "url": "git+https://github.com/SongOnRoc/opencode-diff-preview.git"
+  },
+  "bugs": {
+    "url": "https://github.com/SongOnRoc/opencode-diff-preview/issues"
   },
   "type": "module",
   "main": "./dist/index.js",
