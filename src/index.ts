@@ -35,6 +35,67 @@ type Txn = {
   timer?: ReturnType<typeof setTimeout>
 }
 
+type FileSystemLike = {
+  unlink: (filePath: string) => Promise<void>
+}
+
+const uniqueNonEmptyPaths = (filePaths: string[]): string[] => {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const filePath of filePaths) {
+    const normalized = (filePath || "").toString().trim()
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    out.push(normalized)
+  }
+  return out
+}
+
+const cleanupPreviewFilesBestEffort = async (fsLike: FileSystemLike, filePaths: string[]): Promise<void> => {
+  for (const filePath of uniqueNonEmptyPaths(filePaths)) {
+    try {
+      await fsLike.unlink(filePath)
+    } catch {
+      // ignore
+    }
+  }
+}
+
+const createPreviewArtifactTracker = () => {
+  const byRequestID = new Map<string, string[]>()
+  return {
+    register(requestID: string | undefined, filePaths: string[]) {
+      if (!requestID) return
+      const prev = byRequestID.get(requestID) || []
+      byRequestID.set(requestID, uniqueNonEmptyPaths([...prev, ...filePaths]))
+    },
+    take(requestID: string | undefined): string[] {
+      if (!requestID) return []
+      const paths = byRequestID.get(requestID) || []
+      byRequestID.delete(requestID)
+      return paths
+    },
+  }
+}
+
+const isAllowReply = (reply: string): boolean => {
+  const r = (reply || "").toString().trim().toLowerCase()
+  return r === "once" || r === "always" || r === "allow"
+}
+
+const isDenyReply = (reply: string): boolean => {
+  const r = (reply || "").toString().trim().toLowerCase()
+  return r === "deny" || r === "never" || r === "no" || r === "cancel" || r === "reject"
+}
+
+export const __internal = {
+  uniqueNonEmptyPaths,
+  cleanupPreviewFilesBestEffort,
+  createPreviewArtifactTracker,
+  isAllowReply,
+  isDenyReply,
+}
+
 const DEFAULT_CONFIG: DiffConfig = {
   editor: "code",
   mode: "permission",
@@ -84,6 +145,7 @@ export const DiffPreviewPlugin = async ({ directory }: any) => {
   let txnActive: Txn | null = null
   const txnQueue: Txn[] = []
   const txnManagedCallIDs = new Set<string>()
+  const previewArtifactTracker = createPreviewArtifactTracker()
 
   const homedir = () => {
     try {
@@ -497,20 +559,19 @@ export const DiffPreviewPlugin = async ({ directory }: any) => {
     return typeof callID === "string" && callID ? callID : undefined
   }
 
-  const isAllowReply = (reply: string): boolean => {
-    const r = (reply || "").toString().trim().toLowerCase()
-    return r === "once" || r === "always" || r === "allow"
-  }
-
-  const isDenyReply = (reply: string): boolean => {
-    const r = (reply || "").toString().trim().toLowerCase()
-    return r === "deny" || r === "never" || r === "no" || r === "cancel"
-  }
-
   const txnBestEffortRollback = async (txn: Txn): Promise<void> => {
     for (const f of txn.files) {
       await rollbackRealFile(f.fsPath, f.originalExisted, f.originalText)
     }
+  }
+
+  const cleanupPreviewArtifactsForRequest = async (requestID: string | undefined): Promise<void> => {
+    await cleanupPreviewFilesBestEffort(fs, previewArtifactTracker.take(requestID))
+  }
+
+  const cleanupPreviewArtifactsForReplyEvent = async (replyEvent: any): Promise<void> => {
+    const requestID = typeof (replyEvent as any)?.properties?.requestID === "string" ? (replyEvent as any).properties.requestID : undefined
+    await cleanupPreviewArtifactsForRequest(requestID)
   }
 
   const txnEnqueueFromPermissionAsked = async (permissionEvent: any): Promise<{ ok: boolean; callID?: string }> => {
@@ -600,6 +661,10 @@ export const DiffPreviewPlugin = async ({ directory }: any) => {
     for (const f of txn.files) {
       if (f.originalPreviewPath) await writeTextFile(f.originalPreviewPath, f.originalText)
     }
+    previewArtifactTracker.register(
+      txn.requestID,
+      txn.files.map((f) => f.originalPreviewPath || "")
+    )
     for (const f of txn.files) {
       await writeRealFile(f.fsPath, f.expectedText)
     }
@@ -615,6 +680,7 @@ export const DiffPreviewPlugin = async ({ directory }: any) => {
       try {
         await txnBestEffortRollback(txn)
         txn.state = "timeout"
+        await cleanupPreviewArtifactsForRequest(txn.requestID)
       } finally {
         txnActive = null
         txnManagedCallIDs.delete(txn.callID)
@@ -635,6 +701,7 @@ export const DiffPreviewPlugin = async ({ directory }: any) => {
     }
     if (isDenyReply(reply)) {
       await txnBestEffortRollback(txn)
+      await cleanupPreviewArtifactsForRequest(txn.requestID)
       txn.state = "denied"
       txnActive = null
       txnManagedCallIDs.delete(txn.callID)
@@ -642,11 +709,20 @@ export const DiffPreviewPlugin = async ({ directory }: any) => {
       return
     }
     if (isAllowReply(reply)) {
+      await cleanupPreviewArtifactsForRequest(txn.requestID)
       txn.state = "done"
       txnActive = null
       txnManagedCallIDs.delete(txn.callID)
       await txnActivateIfNeeded()
+      return
     }
+
+    await txnBestEffortRollback(txn)
+    await cleanupPreviewArtifactsForRequest(txn.requestID)
+    txn.state = "denied"
+    txnActive = null
+    txnManagedCallIDs.delete(txn.callID)
+    await txnActivateIfNeeded()
   }
 
   const openPermissionPreview = async (permissionEvent: any): Promise<void> => {
@@ -661,14 +737,18 @@ export const DiffPreviewPlugin = async ({ directory }: any) => {
     if (segments.length === 0) return
     const previewDir = await getPreviewDir()
     if (!previewDir) return
+    const requestID = typeof (permissionEvent as any)?.properties?.id === "string" ? (permissionEvent as any).properties.id : undefined
+    const previewPaths: string[] = []
     for (const seg of segments) {
       const key = sanitizeForFileName(seg.fileKey || "patch")
       const left = path.join(previewDir, `${key}(Original).txt`)
       const right = path.join(previewDir, `${key}(CodeChanges).txt`)
       await writeTextFile(left, "")
       await writeTextFile(right, seg.text)
+       previewPaths.push(left, right)
       await runEditorDiff(left, right)
     }
+    previewArtifactTracker.register(requestID, previewPaths)
   }
 
   const handlePermissionAskedWithStrategy = async (permissionEvent: any): Promise<void> => {
@@ -693,6 +773,7 @@ export const DiffPreviewPlugin = async ({ directory }: any) => {
       }
       if (ev?.type === "permission.replied") {
         await txnHandlePermissionReplied(ev)
+        await cleanupPreviewArtifactsForReplyEvent(ev)
       }
     },
     "tool.execute.after": async (input: any) => {

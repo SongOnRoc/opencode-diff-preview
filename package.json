@@ -1,6 +1,6 @@
 {
   "name": "opencode-diff-preview",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenCode plugin for permission-time VS Code diff preview on Windows",
   "keywords": [
     "opencode",
@@ -23,11 +23,12 @@
     ".": "./dist/index.js"
   },
   "files": [
-    "dist",
+    "dist/index.js",
     "README.md"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test": "pnpm build && node --test dist/test/preview-cleanup.test.js"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
